@@ -1,10 +1,10 @@
+use serde_json::json;
 use axum::extract::ws::Message;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, net::TcpListener};
 
 use crate::{state::AppState, util::encode_fast_png};
 
-// TCP frame listener (Python -> Rust).
 pub async fn start_frame_listener(state: Arc<AppState>) {
     let listener = TcpListener::bind("0.0.0.0:5001").await.unwrap();
     tracing::info!("TCP frame server started on port 5001");
@@ -40,14 +40,15 @@ pub async fn start_frame_listener(state: Arc<AppState>) {
 
                 if let Some(tx) = state.ws_clients.get(&user_id) {
                     let tx = tx.clone();
-                    tracing::debug!("Dispatching frame to ws client user_id {}", user_id);
                     // Offload CPU-heavy encoding to the blocking thread pool.
                     tokio::task::spawn_blocking(move || {
                         let base64_png = encode_fast_png(&frame_buf);
-                        let payload = format!(
-                            r#"{{\"type\":\"PREVIEW_FRAME\",\"payload\":\"data:image/png;base64,{}\"}}"#,
-                            base64_png
-                        );
+                        
+                        let payload = json!({
+                            "type": "PREVIEW_FRAME",
+                            "payload": format!("data:image/png;base64,{}", base64_png)
+                        }).to_string();
+                        
                         let _ = tx.try_send(Message::Text(payload.into()));
                     });
                 } else {
