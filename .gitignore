@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target/
+
+# Cargo temporary files
+**/*.rs.bk
+
+# IDEs
+/.idea/
+/.vscode/
+
+# OS files
+.DS_Store
+
