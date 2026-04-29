@@ -32,12 +32,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     if user_id.is_empty() {
+        tracing::warn!("WebSocket auth failed: empty user_id");
         let _ = socket
             .send(Message::Text(json!({"type": "ERROR"}).to_string().into()))
             .await;
         return;
     }
 
+    tracing::info!("WebSocket authenticated user_id {}", user_id);
     let _ = socket
         .send(Message::Text(
             json!({"type": "AUTH_SUCCESS"}).to_string().into(),
@@ -50,6 +52,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(32);
     state.ws_clients.insert(user_id.clone(), tx);
+    tracing::info!("WebSocket client registered user_id {}", user_id);
 
     // Task: send to WebSocket
     let mut send_task = tokio::spawn(async move {
@@ -79,5 +82,6 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Cleanup after disconnect
     state.ws_clients.remove(&user_id);
+    tracing::info!("WebSocket client disconnected user_id {}", user_id);
     let _ = state.cmd_tx.send(json!({"event": "disconnect", "user_id": user_id}).to_string() + "\n");
 }
