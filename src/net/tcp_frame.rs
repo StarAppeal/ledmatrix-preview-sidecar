@@ -1,5 +1,5 @@
-use serde_json::json;
 use axum::extract::ws::Message;
+use serde_json::json;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, net::TcpListener};
 
@@ -17,7 +17,11 @@ pub async fn start_frame_listener(state: Arc<AppState>) {
             loop {
                 // Protocol: 1 byte user-id length, N bytes user-id, 12288 bytes RGB data
                 if let Err(err) = socket.read_exact(&mut len_buf).await {
-                    tracing::warn!("TCP frame read failed (user-id length) from {}: {}", peer_addr, err);
+                    tracing::warn!(
+                        "TCP frame read failed (user-id length) from {}: {}",
+                        peer_addr,
+                        err
+                    );
                     break;
                 }
                 let len = len_buf[0] as usize;
@@ -27,29 +31,41 @@ pub async fn start_frame_listener(state: Arc<AppState>) {
 
                 let mut id_buf = vec![0u8; len];
                 if let Err(err) = socket.read_exact(&mut id_buf).await {
-                    tracing::warn!("TCP frame read failed (user-id bytes, len {}) from {}: {}", len, peer_addr, err);
+                    tracing::warn!(
+                        "TCP frame read failed (user-id bytes, len {}) from {}: {}",
+                        len,
+                        peer_addr,
+                        err
+                    );
                     break;
                 }
                 let user_id = String::from_utf8_lossy(&id_buf).to_string();
 
                 let mut frame_buf = vec![0u8; 12288];
                 if let Err(err) = socket.read_exact(&mut frame_buf).await {
-                    tracing::warn!("TCP frame read failed (frame bytes) from {} for user_id {}: {}", peer_addr, user_id, err);
+                    tracing::warn!(
+                        "TCP frame read failed (frame bytes) from {} for user_id {}: {}",
+                        peer_addr,
+                        user_id,
+                        err
+                    );
                     break;
                 }
 
-                if let Some(tx) = state.ws_clients.get(&user_id) {
-                    let tx = tx.clone();
+                if let Some(room) = state.ws_clients.get(&user_id) {
+                    let tx = room.tx.clone();
+
                     // Offload CPU-heavy encoding to the blocking thread pool.
                     tokio::task::spawn_blocking(move || {
                         let base64_png = encode_fast_png(&frame_buf);
-                        
+
                         let payload = json!({
                             "type": "PREVIEW_FRAME",
                             "payload": format!("data:image/png;base64,{}", base64_png)
-                        }).to_string();
-                        
-                        let _ = tx.try_send(Message::Text(payload.into()));
+                        })
+                        .to_string();
+
+                        let _ = tx.send(payload);
                     });
                 } else {
                     tracing::warn!("No ws client for user_id {}, dropping frame", user_id);

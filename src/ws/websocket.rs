@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::{auth::{AuthMsg, verify_token}, state::AppState};
+use crate::state::app_state::UserRoom;
 
 // WebSocket entrypoint with auth flow.
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -20,7 +21,6 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut user_id = String::new();
 
-    // 1. Wait for AUTH message
     if let Some(msg) = socket.next().await {
         if let Ok(Message::Text(text)) = msg {
             if let Ok(auth_data) = serde_json::from_str::<AuthMsg>(&text) {
@@ -33,37 +33,38 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
     if user_id.is_empty() {
         tracing::warn!("WebSocket auth failed: empty user_id");
-        let _ = socket
-            .send(Message::Text(json!({"type": "ERROR"}).to_string().into()))
-            .await;
+        let _ = socket.send(Message::Text(json!({"type": "ERROR"}).to_string().into())).await;
         return;
     }
 
     tracing::info!("WebSocket authenticated user_id {}", user_id);
-    let _ = socket
-        .send(Message::Text(
-            json!({"type": "AUTH_SUCCESS"}).to_string().into(),
-        ))
-        .await;
+    let _ = socket.send(Message::Text(json!({"type": "AUTH_SUCCESS"}).to_string().into())).await;
 
-    // Send connect event to Python
-    let _ = state.cmd_tx.send(json!({"event": "connect", "user_id": user_id}).to_string() + "\n");
+    let (mut rx, is_first) = {
+        let mut room = state.ws_clients.entry(user_id.clone()).or_insert_with(|| {
+            let (tx, _) = tokio::sync::broadcast::channel(16);
+            UserRoom { tx, connection_count: 0 }
+        });
 
-    let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<Message>(32);
-    state.ws_clients.insert(user_id.clone(), tx);
+        room.connection_count += 1;
+        (room.tx.subscribe(), room.connection_count == 1)
+    };
+
+    if is_first {
+        let _ = state.cmd_tx.send(json!({"event": "connect", "user_id": user_id}).to_string() + "\n");
+    }
+
     tracing::info!("WebSocket client registered user_id {}", user_id);
+    let (mut sender, mut receiver) = socket.split();
 
-    // Task: send to WebSocket
     let mut send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sender.send(msg).await.is_err() {
+        while let Ok(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
         }
     });
 
-    // Task: receive from WebSocket and forward to Python
     let cmd_tx_clone = state.cmd_tx.clone();
     let uid_clone = user_id.clone();
     let mut recv_task = tokio::spawn(async move {
@@ -78,10 +79,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     tokio::select! {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
+    }
+
+    let is_last = {
+        if let Some(mut room) = state.ws_clients.get_mut(&user_id) {
+            room.connection_count -= 1;
+            room.connection_count == 0
+        } else {
+            false
+        }
     };
 
-    // Cleanup after disconnect
-    state.ws_clients.remove(&user_id);
-    tracing::info!("WebSocket client disconnected user_id {}", user_id);
-    let _ = state.cmd_tx.send(json!({"event": "disconnect", "user_id": user_id}).to_string() + "\n");
+    if is_last {
+        state.ws_clients.remove(&user_id);
+        tracing::info!("All websockets closed for user_id {}", user_id);
+        let _ = state.cmd_tx.send(json!({"event": "disconnect", "user_id": user_id}).to_string() + "\n");
+    }
 }
