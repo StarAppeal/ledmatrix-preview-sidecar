@@ -11,7 +11,6 @@ pub struct UserRoom {
 pub struct AppState {
     // user_id -> UserRoom
     pub ws_clients: DashMap<String, UserRoom>,
-    // Broadcast channel for commands (connect, clicks) to Python
     pub cmd_tx: broadcast::Sender<String>,
     pub backend_url: String,
 }

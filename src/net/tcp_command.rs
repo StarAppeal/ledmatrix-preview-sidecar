@@ -3,7 +3,6 @@ use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 use crate::state::AppState;
 
-// TCP command listener (Rust -> Python).
 pub async fn start_command_listener(state: Arc<AppState>) {
     let listener = TcpListener::bind("0.0.0.0:5002").await.unwrap();
     tracing::info!("TCP command server started on port 5002");

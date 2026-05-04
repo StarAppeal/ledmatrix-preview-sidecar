@@ -27,11 +27,10 @@ async fn main() {
             .unwrap_or_else(|_| "http://ledmatrix-backend:3000".to_string()),
     });
 
-    // 1. Start the TCP server for frames (Python -> Rust)
+    // 1. Start the TCP server for frames
     let state_clone = state.clone();
     tokio::spawn(async move { start_frame_listener(state_clone).await });
 
-    // 2. Start the TCP server for commands (Rust -> Python)
     let state_clone2 = state.clone();
     tokio::spawn(async move { start_command_listener(state_clone2).await });
 
