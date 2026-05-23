@@ -13,7 +13,6 @@ use tokio::sync::mpsc;
 use crate::{auth::{AuthMsg, verify_token}, state::AppState};
 use crate::state::app_state::UserRoom;
 
-// WebSocket entrypoint with auth flow.
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
@@ -68,10 +67,21 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let cmd_tx_clone = state.cmd_tx.clone();
     let uid_clone = user_id.clone();
     let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = receiver.next().await {
-            if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(&text) {
-                let cmd = json!({"event": "message", "user_id": uid_clone, "data": json_data});
-                let _ = cmd_tx_clone.send(cmd.to_string() + "\n");
+        while let Some(msg_result) = receiver.next().await {
+            match msg_result {
+                Ok(Message::Text(text)) => {
+                    if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(&text) {
+                        let cmd = json!({"event": "message", "user_id": uid_clone, "data": json_data});
+                        let _ = cmd_tx_clone.send(cmd.to_string() + "\n");
+                    }
+                }
+                Ok(Message::Binary(bin)) => {
+                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    let b64 = STANDARD.encode(&bin);
+                    let cmd = json!({"event": "binary", "user_id": uid_clone, "data": b64});
+                    let _ = cmd_tx_clone.send(cmd.to_string() + "\n");
+                }
+                _ => {}
             }
         }
     });
