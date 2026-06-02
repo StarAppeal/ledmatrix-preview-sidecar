@@ -31,27 +31,9 @@ jobs:
           tags: ghcr.io/${{ env.IMAGE_NAME }}:latest
 
   deploy:
-    runs-on: light
     needs: build
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: GHCR_PAT
-          script: |
-            cd /home/matrix/ledmatrix-deployment
-            
-            echo "$GHCR_PAT" | docker login ghcr.io -u starappeal --password-stdin  
-
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull preview-sidecar
-            
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d preview-sidecar
-            
-            docker image prune -f
-            
-            docker logout ghcr.io
-        env:
-          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+    uses: starappeal/deployment/.github/workflows/deploy.yml@5bd423f41254b8f1e55e16a89127ed4a212016a1
+    with:
+      service: preview-sidecar
+      deploy_path:  ${{ vars.DEPLOY_PATH }}
+    secrets: inherit
