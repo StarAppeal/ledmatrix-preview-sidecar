@@ -39,15 +39,27 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket authenticated user_id {}", user_id);
     let _ = socket.send(Message::Text(json!({"type": "AUTH_SUCCESS"}).to_string().into())).await;
 
-    let (mut rx, is_first) = {
+    let (mut rx, is_first, cached_frame) = {
         let mut room = state.ws_clients.entry(user_id.clone()).or_insert_with(|| {
             let (tx, _) = tokio::sync::broadcast::channel(16);
-            UserRoom { tx, connection_count: 0 }
+            UserRoom {
+                tx,
+                connection_count: 0,
+                last_frame: None,
+            }
         });
 
         room.connection_count += 1;
-        (room.tx.subscribe(), room.connection_count == 1)
+        (
+            room.tx.subscribe(),
+            room.connection_count == 1,
+            room.last_frame.clone(),
+        )
     };
+
+    if let Some(frame) = cached_frame {
+        let _ = socket.send(Message::Text(frame.into())).await;
+    }
 
     if is_first {
         let _ = state.cmd_tx.send(json!({"event": "connect", "user_id": user_id}).to_string() + "\n");

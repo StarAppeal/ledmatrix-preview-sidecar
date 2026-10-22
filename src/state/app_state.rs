@@ -4,6 +4,7 @@ use tokio::sync::{broadcast};
 pub struct UserRoom {
     pub tx: broadcast::Sender<String>,
     pub connection_count: usize,
+    pub last_frame: Option<String>,
 }
 
 // Shared state for WebSocket clients and command broadcasting.

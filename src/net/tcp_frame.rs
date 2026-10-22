@@ -54,6 +54,8 @@ pub async fn start_frame_listener(state: Arc<AppState>) {
 
                 if let Some(room) = state.ws_clients.get(&user_id) {
                     let tx = room.tx.clone();
+                    let state_clone = state.clone();
+                    let uid = user_id.clone();
 
                     // Offload CPU-heavy encoding to the blocking thread pool.
                     tokio::task::spawn_blocking(move || {
@@ -64,6 +66,10 @@ pub async fn start_frame_listener(state: Arc<AppState>) {
                             "payload": format!("data:image/png;base64,{}", base64_png)
                         })
                         .to_string();
+
+                        if let Some(mut room) = state_clone.ws_clients.get_mut(&uid) {
+                            room.last_frame = Some(payload.clone());
+                        }
 
                         let _ = tx.send(payload);
                     });
