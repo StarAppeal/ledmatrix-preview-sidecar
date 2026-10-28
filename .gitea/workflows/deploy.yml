@@ -15,9 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare resource-limited builder
+        run: |
+          docker buildx inspect heavy-builder >/dev/null 2>&1 || docker buildx create --name heavy-builder --driver docker-container
+          docker buildx inspect --bootstrap heavy-builder >/dev/null
+          docker update --cpus 2 --memory 4g --memory-swap 4g buildx_buildkit_heavy-builder0
+
       - name: Build image
         run: |
-          docker build \
+          docker buildx build --builder heavy-builder --load \
             -t ledmatrix/preview-sidecar:latest \
             -t ledmatrix/preview-sidecar:${{ github.sha }} .
 
