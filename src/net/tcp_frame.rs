@@ -1,12 +1,10 @@
-use axum::extract::ws::Message;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, net::TcpListener};
 
 use crate::{state::AppState, util::encode_fast_png};
 
-pub async fn start_frame_listener(state: Arc<AppState>) {
-    let listener = TcpListener::bind("0.0.0.0:5001").await.unwrap();
+pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
     tracing::info!("TCP frame server started on port 5001");
 
     while let Ok((mut socket, peer_addr)) = listener.accept().await {

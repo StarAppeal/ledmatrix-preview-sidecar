@@ -16,7 +16,7 @@ use state::AppState;
 use ws::ws_handler;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
 
     let (cmd_tx, _) = tokio::sync::broadcast::channel(100);
@@ -27,20 +27,28 @@ async fn main() {
             .unwrap_or_else(|_| "http://ledmatrix-backend:3000".to_string()),
     });
 
-    // 1. Start the TCP server for frames
-    let state_clone = state.clone();
-    tokio::spawn(async move { start_frame_listener(state_clone).await });
+    // Bind everything up front so a taken port fails startup instead of
+    // silently killing a spawned task.
+    let frame_listener = TcpListener::bind("0.0.0.0:5001").await?;
+    let command_listener = TcpListener::bind("0.0.0.0:5002").await?;
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8765));
+    let ws_listener = TcpListener::bind(&addr).await?;
 
-    let state_clone2 = state.clone();
-    tokio::spawn(async move { start_command_listener(state_clone2).await });
+    let mut frame_task = tokio::spawn(start_frame_listener(frame_listener, state.clone()));
+    let mut command_task = tokio::spawn(start_command_listener(command_listener, state.clone()));
 
-    // 3. Start the public WebSocket server for users
     let app = Router::new()
         .route("/", get(ws_handler))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8765));
     tracing::info!("Rust WebSocket server listening on {}", addr);
-    let listener = TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let mut ws_task = tokio::spawn(async move { axum::serve(ws_listener, app).await });
+
+    tokio::select! {
+        res = &mut frame_task => tracing::error!("TCP frame listener stopped: {:?}", res),
+        res = &mut command_task => tracing::error!("TCP command listener stopped: {:?}", res),
+        res = &mut ws_task => tracing::error!("WebSocket server stopped: {:?}", res),
+    }
+
+    Err(std::io::Error::other("a listener task terminated unexpectedly"))
 }

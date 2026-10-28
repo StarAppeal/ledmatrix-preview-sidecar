@@ -3,8 +3,7 @@ use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 use crate::state::AppState;
 
-pub async fn start_command_listener(state: Arc<AppState>) {
-    let listener = TcpListener::bind("0.0.0.0:5002").await.unwrap();
+pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>) {
     tracing::info!("TCP command server started on port 5002");
 
     while let Ok((mut socket, _)) = listener.accept().await {
