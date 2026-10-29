@@ -2,7 +2,11 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, net::TcpListener};
 
-use crate::{net::ACCEPT_RETRY_DELAY, state::AppState, util::encode_fast_png};
+use crate::{
+    net::{handshake::authenticate, ACCEPT_RETRY_DELAY},
+    state::AppState,
+    util::encode_fast_png,
+};
 
 pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
     tracing::info!("TCP frame server started on port 5001");
@@ -16,9 +20,13 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
                 continue;
             }
         };
-        tracing::info!("TCP frame client connected from {}", peer_addr);
         let state = state.clone();
         tokio::spawn(async move {
+            if !authenticate(&mut socket, state.tcp_secret.as_deref()).await {
+                tracing::warn!("TCP frame handshake failed from {}", peer_addr);
+                return;
+            }
+            tracing::info!("TCP frame client connected from {}", peer_addr);
             let mut len_buf = [0u8; 1];
             loop {
                 // Protocol: 1 byte user-id length, N bytes user-id, 12288 bytes RGB data

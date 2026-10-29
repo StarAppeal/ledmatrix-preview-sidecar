@@ -8,13 +8,17 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use crate::{auth::{AuthMsg, verify_token}, state::AppState};
 use crate::state::app_state::UserRoom;
 
+// Legit binaries are 64x64 frames; this caps what reaches the preview decoder.
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_MESSAGE_SIZE)
+        .max_frame_size(MAX_MESSAGE_SIZE)
+        .on_upgrade(|socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
@@ -39,6 +43,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("WebSocket authenticated user_id {}", user_id);
     let _ = socket.send(Message::Text(json!({"type": "AUTH_SUCCESS"}).to_string().into())).await;
 
+    let mut resync_rx = state.resync_tx.subscribe();
     let (mut rx, is_first, cached_frame) = {
         let mut room = state.ws_clients.entry(user_id.clone()).or_insert_with(|| {
             let (tx, _) = tokio::sync::broadcast::channel(16);
@@ -101,6 +106,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     tokio::select! {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
+        _ = resync_rx.changed() => {
+            tracing::info!("Preview service reconnected, closing websocket for user_id {}", user_id);
+            send_task.abort();
+            recv_task.abort();
+        }
     }
 
     let is_last = {

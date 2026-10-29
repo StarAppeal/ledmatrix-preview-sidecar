@@ -1,3 +1,4 @@
+pub mod handshake;
 pub mod tcp_command;
 pub mod tcp_frame;
 

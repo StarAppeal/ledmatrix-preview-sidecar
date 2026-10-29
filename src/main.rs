@@ -19,12 +19,21 @@ use ws::ws_handler;
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
 
+    let tcp_secret = std::env::var("PREVIEW_TCP_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if tcp_secret.is_none() {
+        tracing::warn!("PREVIEW_TCP_SECRET is not set, TCP ports 5001/5002 accept any client");
+    }
+
     let (cmd_tx, _) = tokio::sync::broadcast::channel(100);
     let state = Arc::new(AppState {
         ws_clients: dashmap::DashMap::new(),
         cmd_tx,
         backend_url: std::env::var("BACKEND_INTERNAL_URL")
             .unwrap_or_else(|_| "http://ledmatrix-backend:3000".to_string()),
+        tcp_secret,
+        resync_tx: tokio::sync::watch::channel(0).0,
     });
 
     // Bind everything up front so a taken port fails startup instead of
