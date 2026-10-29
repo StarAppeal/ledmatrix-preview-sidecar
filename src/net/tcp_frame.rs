@@ -2,12 +2,20 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, net::TcpListener};
 
-use crate::{state::AppState, util::encode_fast_png};
+use crate::{net::ACCEPT_RETRY_DELAY, state::AppState, util::encode_fast_png};
 
 pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
     tracing::info!("TCP frame server started on port 5001");
 
-    while let Ok((mut socket, peer_addr)) = listener.accept().await {
+    loop {
+        let (mut socket, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!("TCP frame accept failed: {}", err);
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
+        };
         tracing::info!("TCP frame client connected from {}", peer_addr);
         let state = state.clone();
         tokio::spawn(async move {
