@@ -32,6 +32,7 @@ async fn main() -> std::io::Result<()> {
         cmd_tx,
         backend_url: std::env::var("BACKEND_INTERNAL_URL")
             .unwrap_or_else(|_| "http://ledmatrix-backend:3000".to_string()),
+        http: auth::http_client(),
         tcp_secret,
         resync_tx: tokio::sync::watch::channel(0).0,
     });
