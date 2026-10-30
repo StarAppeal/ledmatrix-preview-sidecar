@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::{io::AsyncWriteExt, net::TcpListener};
+use tokio::{io::AsyncWriteExt, net::TcpListener, sync::broadcast::error::RecvError};
 
 use crate::{
     net::{handshake::authenticate, ACCEPT_RETRY_DELAY},
@@ -27,11 +27,26 @@ pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>)
             tracing::info!("TCP command client connected from {}", peer_addr);
             let mut rx = state.cmd_tx.subscribe();
             state.resync_tx.send_modify(|generation| *generation += 1);
-            while let Ok(msg) = rx.recv().await {
+            loop {
+                let msg = match rx.recv().await {
+                    Ok(msg) => msg,
+                    // Lost commands would desync the sessions; closing makes the preview
+                    // service drop them and reconnect, which triggers a full resync.
+                    Err(RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            "TCP command client {} lagged by {} messages, closing for resync",
+                            peer_addr,
+                            skipped
+                        );
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                };
                 if socket.write_all(msg.as_bytes()).await.is_err() {
                     break;
                 }
             }
+            tracing::info!("TCP command client disconnected from {}", peer_addr);
         });
     }
 }

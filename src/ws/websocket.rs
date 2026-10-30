@@ -8,9 +8,9 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::sync::Arc;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::{auth::{AuthMsg, verify_token}, state::AppState};
-use crate::state::app_state::UserRoom;
 
 // Legit binaries are 64x64 frames; this caps what reaches the preview decoder.
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
@@ -44,37 +44,23 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let _ = socket.send(Message::Text(json!({"type": "AUTH_SUCCESS"}).to_string().into())).await;
 
     let mut resync_rx = state.resync_tx.subscribe();
-    let (mut rx, is_first, cached_frame) = {
-        let mut room = state.ws_clients.entry(user_id.clone()).or_insert_with(|| {
-            let (tx, _) = tokio::sync::broadcast::channel(16);
-            UserRoom {
-                tx,
-                connection_count: 0,
-                last_frame: None,
-            }
-        });
-
-        room.connection_count += 1;
-        (
-            room.tx.subscribe(),
-            room.connection_count == 1,
-            room.last_frame.clone(),
-        )
-    };
+    let (mut rx, cached_frame) = state.join_room(&user_id);
 
     if let Some(frame) = cached_frame {
         let _ = socket.send(Message::Text(frame.into())).await;
-    }
-
-    if is_first {
-        let _ = state.cmd_tx.send(json!({"event": "connect", "user_id": user_id}).to_string() + "\n");
     }
 
     tracing::info!("WebSocket client registered user_id {}", user_id);
     let (mut sender, mut receiver) = socket.split();
 
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
+        loop {
+            let msg = match rx.recv().await {
+                Ok(msg) => msg,
+                // Only the newest frame matters, so a slow client just skips ahead.
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            };
             if sender.send(Message::Text(msg.into())).await.is_err() {
                 break;
             }
@@ -113,18 +99,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    let is_last = {
-        if let Some(mut room) = state.ws_clients.get_mut(&user_id) {
-            room.connection_count -= 1;
-            room.connection_count == 0
-        } else {
-            false
-        }
-    };
-
-    if is_last {
-        state.ws_clients.remove(&user_id);
+    if state.leave_room(&user_id) {
         tracing::info!("All websockets closed for user_id {}", user_id);
-        let _ = state.cmd_tx.send(json!({"event": "disconnect", "user_id": user_id}).to_string() + "\n");
     }
 }
