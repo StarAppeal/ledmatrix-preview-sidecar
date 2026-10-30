@@ -1,6 +1,15 @@
-FROM rust:1-bookworm as builder
+FROM rust:1.95-bookworm AS base
 WORKDIR /app
 COPY . .
+
+FROM base AS test
+RUN rustup component add clippy
+RUN --mount=type=cache,id=sidecar-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=sidecar-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=sidecar-target,target=/app/target \
+    cargo clippy --all-targets -- -D warnings && cargo test
+
+FROM base AS builder
 RUN --mount=type=cache,id=sidecar-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=sidecar-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=sidecar-target,target=/app/target \

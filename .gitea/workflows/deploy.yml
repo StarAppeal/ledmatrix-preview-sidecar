@@ -21,6 +21,11 @@ jobs:
           docker buildx inspect --bootstrap heavy-builder >/dev/null
           docker update --cpus 2 --memory 4g --memory-swap 4g buildx_buildkit_heavy-builder0
 
+      - name: Lint and test
+        run: |
+          docker buildx build --builder heavy-builder --target test --output type=cacheonly \
+            .
+
       - name: Build image
         run: |
           docker buildx build --builder heavy-builder --load \
