@@ -24,12 +24,10 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut user_id = String::new();
 
-    if let Some(msg) = socket.next().await {
-        if let Ok(Message::Text(text)) = msg {
-            if let Ok(auth_data) = serde_json::from_str::<AuthMsg>(&text) {
-                if auth_data.msg_type == "AUTH" {
-                    user_id = verify_token(&auth_data.token, &state.backend_url).await;
-                }
+    if let Some(Ok(Message::Text(text))) = socket.next().await {
+        if let Ok(auth_data) = serde_json::from_str::<AuthMsg>(&text) {
+            if auth_data.msg_type == "AUTH" {
+                user_id = verify_token(&auth_data.token, &state.backend_url).await;
             }
         }
     }

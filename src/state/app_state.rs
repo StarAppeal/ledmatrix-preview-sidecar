@@ -25,14 +25,17 @@ impl AppState {
     // connect/disconnect are sent while holding the entry lock so they reach the
     // preview service in the same order as the room changes.
     pub fn join_room(&self, user_id: &str) -> (broadcast::Receiver<String>, Option<String>) {
-        let mut room = self.ws_clients.entry(user_id.to_string()).or_insert_with(|| {
-            let (tx, _) = broadcast::channel(16);
-            UserRoom {
-                tx,
-                connection_count: 0,
-                last_frame: None,
-            }
-        });
+        let mut room = self
+            .ws_clients
+            .entry(user_id.to_string())
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(16);
+                UserRoom {
+                    tx,
+                    connection_count: 0,
+                    last_frame: None,
+                }
+            });
 
         room.connection_count += 1;
         if room.connection_count == 1 {
