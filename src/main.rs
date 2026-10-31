@@ -26,6 +26,11 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!("PREVIEW_TCP_SECRET is not set, TCP ports 5001/5002 accept any client");
     }
 
+    let max_device_rooms = std::env::var("MAX_DEVICE_SESSIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(50);
+
     let (cmd_tx, _) = tokio::sync::broadcast::channel(100);
     let state = Arc::new(AppState {
         ws_clients: dashmap::DashMap::new(),
@@ -35,6 +40,8 @@ async fn main() -> std::io::Result<()> {
         http: auth::http_client(),
         tcp_secret,
         resync_tx: tokio::sync::watch::channel(0).0,
+        max_device_rooms,
+        device_grace: std::time::Duration::from_secs(60),
     });
 
     // Bind everything up front so a taken port fails startup instead of

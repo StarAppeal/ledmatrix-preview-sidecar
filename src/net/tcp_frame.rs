@@ -1,3 +1,4 @@
+use axum::body::Bytes;
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 use tokio::{io::AsyncReadExt, net::TcpListener, sync::watch};
@@ -27,7 +28,7 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
                 return;
             }
             tracing::info!("TCP frame client connected from {}", peer_addr);
-            let mut encoders: HashMap<String, watch::Sender<Vec<u8>>> = HashMap::new();
+            let mut encoders: HashMap<String, watch::Sender<Bytes>> = HashMap::new();
             let mut len_buf = [0u8; 1];
             loop {
                 // Protocol: 1 byte user-id length, N bytes user-id, 12288 bytes RGB data
@@ -67,19 +68,33 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
                     break;
                 }
 
-                if state.ws_clients.contains_key(&user_id) {
+                let frame = Bytes::from(frame_buf);
+                let wants_png = match state.ws_clients.get_mut(&user_id) {
+                    Some(mut room) => {
+                        room.last_frame = Some(frame.clone());
+                        if room.raw_viewers > 0 {
+                            let _ = room.raw_tx.send(frame.clone());
+                        }
+                        room.png_viewers > 0
+                    }
+                    None => {
+                        encoders.remove(&user_id);
+                        tracing::warn!("No ws client for user_id {}, dropping frame", user_id);
+                        continue;
+                    }
+                };
+
+                // PNG is only encoded while someone in the room wants it
+                if wants_png {
                     let frame_tx = encoders
                         .entry(user_id.clone())
                         .or_insert_with(|| spawn_encoder(state.clone(), user_id.clone()));
-                    if let Err(watch::error::SendError(frame)) = frame_tx.send(frame_buf) {
+                    if let Err(watch::error::SendError(frame)) = frame_tx.send(frame) {
                         // The encoder stopped after the room was gone for a moment; start a new one
                         let frame_tx = spawn_encoder(state.clone(), user_id.clone());
                         let _ = frame_tx.send(frame);
                         encoders.insert(user_id, frame_tx);
                     }
-                } else {
-                    encoders.remove(&user_id);
-                    tracing::warn!("No ws client for user_id {}, dropping frame", user_id);
                 }
             }
             tracing::info!("TCP frame client disconnected from {}", peer_addr);
@@ -87,8 +102,8 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
     }
 }
 
-fn spawn_encoder(state: Arc<AppState>, user_id: String) -> watch::Sender<Vec<u8>> {
-    let (frame_tx, mut frame_rx) = watch::channel(Vec::new());
+fn spawn_encoder(state: Arc<AppState>, user_id: String) -> watch::Sender<Bytes> {
+    let (frame_tx, mut frame_rx) = watch::channel(Bytes::new());
     tokio::spawn(async move {
         while frame_rx.changed().await.is_ok() {
             let frame = frame_rx.borrow_and_update().clone();
@@ -97,17 +112,16 @@ fn spawn_encoder(state: Arc<AppState>, user_id: String) -> watch::Sender<Vec<u8>
                 continue;
             };
 
-            let Some(mut room) = state.ws_clients.get_mut(&user_id) else {
+            let Some(room) = state.ws_clients.get(&user_id) else {
                 break;
             };
-            room.last_frame = Some(payload.clone());
-            let _ = room.tx.send(payload);
+            let _ = room.png_tx.send(payload);
         }
     });
     frame_tx
 }
 
-fn frame_payload(raw_rgb: &[u8]) -> String {
+pub fn frame_payload(raw_rgb: &[u8]) -> String {
     json!({
         "type": "PREVIEW_FRAME",
         "payload": format!("data:image/png;base64,{}", encode_fast_png(raw_rgb))
@@ -118,29 +132,19 @@ fn frame_payload(raw_rgb: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dashmap::DashMap;
+    use crate::state::{test_state, FrameFormat, ViewerRx};
     use std::time::Duration;
-    use tokio::sync::broadcast;
 
-    fn state() -> Arc<AppState> {
-        Arc::new(AppState {
-            ws_clients: DashMap::new(),
-            cmd_tx: broadcast::channel(16).0,
-            backend_url: String::new(),
-            http: reqwest::Client::new(),
-            tcp_secret: None,
-            resync_tx: watch::channel(0).0,
-        })
-    }
-
-    fn frame(value: u8) -> Vec<u8> {
-        vec![value; 12288]
+    fn frame(value: u8) -> Bytes {
+        Bytes::from(vec![value; 12288])
     }
 
     #[tokio::test]
-    async fn the_newest_frame_wins_and_is_cached() {
-        let state = state();
-        let (mut rx, _) = state.join_room("u1");
+    async fn the_newest_frame_wins() {
+        let (state, _) = test_state();
+        let ViewerRx::Png(mut rx) = state.join_room("u1", FrameFormat::Png).unwrap().rx else {
+            unreachable!()
+        };
         let frame_tx = spawn_encoder(state.clone(), "u1".to_string());
 
         for value in 0..50 {
@@ -158,17 +162,13 @@ mod tests {
         }
 
         assert!(received.len() < 50);
-        assert_eq!(
-            state.ws_clients.get("u1").unwrap().last_frame.as_ref(),
-            Some(&newest)
-        );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(rx.try_recv().is_err(), "an older frame arrived after the newest");
     }
 
     #[tokio::test]
     async fn stops_once_the_room_is_gone() {
-        let state = state();
+        let (state, _) = test_state();
         let frame_tx = spawn_encoder(state.clone(), "nobody".to_string());
 
         frame_tx.send(frame(1)).unwrap();
