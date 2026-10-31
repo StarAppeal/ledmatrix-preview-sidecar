@@ -1,7 +1,4 @@
-use axum::{
-    routing::get,
-    Router,
-};
+use axum::{routing::get, Router};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -26,6 +23,11 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!("PREVIEW_TCP_SECRET is not set, TCP ports 5001/5002 accept any client");
     }
 
+    let max_device_rooms = std::env::var("MAX_DEVICE_SESSIONS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(50);
+
     let (cmd_tx, _) = tokio::sync::broadcast::channel(100);
     let state = Arc::new(AppState {
         ws_clients: dashmap::DashMap::new(),
@@ -35,6 +37,8 @@ async fn main() -> std::io::Result<()> {
         http: auth::http_client(),
         tcp_secret,
         resync_tx: tokio::sync::watch::channel(0).0,
+        max_device_rooms,
+        device_grace: std::time::Duration::from_secs(60),
     });
 
     // Bind everything up front so a taken port fails startup instead of
@@ -47,9 +51,7 @@ async fn main() -> std::io::Result<()> {
     let mut frame_task = tokio::spawn(start_frame_listener(frame_listener, state.clone()));
     let mut command_task = tokio::spawn(start_command_listener(command_listener, state.clone()));
 
-    let app = Router::new()
-        .route("/", get(ws_handler))
-        .with_state(state);
+    let app = Router::new().route("/", get(ws_handler)).with_state(state);
 
     tracing::info!("Rust WebSocket server listening on {}", addr);
     let mut ws_task = tokio::spawn(async move { axum::serve(ws_listener, app).await });
@@ -60,5 +62,7 @@ async fn main() -> std::io::Result<()> {
         res = &mut ws_task => tracing::error!("WebSocket server stopped: {:?}", res),
     }
 
-    Err(std::io::Error::other("a listener task terminated unexpectedly"))
+    Err(std::io::Error::other(
+        "a listener task terminated unexpectedly",
+    ))
 }

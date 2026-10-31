@@ -15,5 +15,3 @@ pub fn encode_fast_png(raw_rgb: &[u8]) -> String {
     }
     STANDARD.encode(&buffer)
 }
-
-

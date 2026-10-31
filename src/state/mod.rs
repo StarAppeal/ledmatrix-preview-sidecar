@@ -1,4 +1,5 @@
 pub mod app_state;
 
-pub use app_state::AppState;
-
+#[cfg(test)]
+pub use app_state::test_state;
+pub use app_state::{is_device_room, AppState, FrameFormat, ViewerRx, DEVICE_ROOM_PREFIX};

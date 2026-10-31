@@ -26,6 +26,7 @@ pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>)
             }
             tracing::info!("TCP command client connected from {}", peer_addr);
             let mut rx = state.cmd_tx.subscribe();
+            state.reset_device_sessions();
             state.resync_tx.send_modify(|generation| *generation += 1);
             loop {
                 let msg = match rx.recv().await {
@@ -50,5 +51,3 @@ pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>)
         });
     }
 }
-
-
