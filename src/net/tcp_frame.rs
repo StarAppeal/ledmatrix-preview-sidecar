@@ -27,7 +27,6 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
                 return;
             }
             tracing::info!("TCP frame client connected from {}", peer_addr);
-            // One encoder per user for this connection; dropped (and stopped) with it
             let mut encoders: HashMap<String, watch::Sender<Vec<u8>>> = HashMap::new();
             let mut len_buf = [0u8; 1];
             loop {
@@ -88,14 +87,9 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
     }
 }
 
-/// Encodes one user's frames one at a time. The watch channel only keeps the newest frame, so
-/// frames arriving faster than they can be encoded are skipped instead of piling up as tasks, and
-/// results can't overtake each other (which made animations jump back and could leave an older
-/// frame as `last_frame`).
 fn spawn_encoder(state: Arc<AppState>, user_id: String) -> watch::Sender<Vec<u8>> {
     let (frame_tx, mut frame_rx) = watch::channel(Vec::new());
     tokio::spawn(async move {
-        // Ends when the frame connection drops its sender
         while frame_rx.changed().await.is_ok() {
             let frame = frame_rx.borrow_and_update().clone();
             // Offload CPU-heavy encoding to the blocking thread pool.
@@ -163,7 +157,6 @@ mod tests {
             received.push(msg);
         }
 
-        // Skipped frames are fine, frames arriving out of order are not
         assert!(received.len() < 50);
         assert_eq!(
             state.ws_clients.get("u1").unwrap().last_frame.as_ref(),

@@ -25,8 +25,6 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut user_id = String::new();
 
-    // Unauthenticated sockets that never send anything would otherwise hold a task and a file
-    // descriptor until the client goes away
     if let Ok(Some(Ok(Message::Text(text)))) = tokio::time::timeout(AUTH_TIMEOUT, socket.next()).await {
         if let Ok(auth_data) = serde_json::from_str::<AuthMsg>(&text) {
             if auth_data.msg_type == "AUTH" {
