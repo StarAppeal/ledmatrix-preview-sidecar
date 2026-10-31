@@ -7,13 +7,14 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{auth::{AuthMsg, verify_token}, state::AppState};
 
 // Legit binaries are 64x64 frames; this caps what reaches the preview decoder.
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ws.max_message_size(MAX_MESSAGE_SIZE)
@@ -24,10 +25,10 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut user_id = String::new();
 
-    if let Some(Ok(Message::Text(text))) = socket.next().await {
+    if let Ok(Some(Ok(Message::Text(text)))) = tokio::time::timeout(AUTH_TIMEOUT, socket.next()).await {
         if let Ok(auth_data) = serde_json::from_str::<AuthMsg>(&text) {
             if auth_data.msg_type == "AUTH" {
-                user_id = verify_token(&auth_data.token, &state.backend_url).await;
+                user_id = verify_token(&state.http, &auth_data.token, &state.backend_url).await;
             }
         }
     }

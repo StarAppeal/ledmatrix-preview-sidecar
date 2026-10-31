@@ -14,6 +14,7 @@ pub struct AppState {
     pub ws_clients: DashMap<String, UserRoom>,
     pub cmd_tx: broadcast::Sender<String>,
     pub backend_url: String,
+    pub http: reqwest::Client,
     pub tcp_secret: Option<String>,
     // Bumped whenever a command client connects; browser sockets close on change
     // and reconnect, which re-creates their session in the new preview instance.
@@ -73,6 +74,7 @@ mod tests {
             ws_clients: DashMap::new(),
             cmd_tx,
             backend_url: String::new(),
+            http: reqwest::Client::new(),
             tcp_secret: None,
             resync_tx: watch::channel(0).0,
         };
