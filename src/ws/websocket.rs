@@ -114,7 +114,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         if token.is_none() {
             tracing::warn!("Could not start device session {}", room_id);
             state.leave_room(&room_id, format);
-            let _ = socket.send(text(json!({"type": "ERROR"}))).await;
+            let _ = socket.send(text(json!({"type": "START_FAILED"}))).await;
             return;
         }
         if started {
@@ -130,10 +130,21 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
     let (mut sender, mut receiver) = socket.split();
 
+    let mut start_failed_rx = joined.start_failed_rx;
     let mut send_task = tokio::spawn(async move {
-        match joined.rx {
-            ViewerRx::Png(rx) => forward(rx, &mut sender, |msg| Message::Text(msg.into())).await,
-            ViewerRx::Raw(rx) => forward(rx, &mut sender, Message::Binary).await,
+        let frames = async {
+            match joined.rx {
+                ViewerRx::Png(rx) => {
+                    forward(rx, &mut sender, |msg| Message::Text(msg.into())).await
+                }
+                ViewerRx::Raw(rx) => forward(rx, &mut sender, Message::Binary).await,
+            }
+        };
+        tokio::select! {
+            _ = frames => {}
+            _ = start_failed_rx.recv() => {
+                let _ = sender.send(text(json!({"type": "START_FAILED"}))).await;
+            }
         }
     });
 

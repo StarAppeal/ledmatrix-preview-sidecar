@@ -1,7 +1,4 @@
-use axum::{
-    routing::get,
-    Router,
-};
+use axum::{routing::get, Router};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -54,9 +51,7 @@ async fn main() -> std::io::Result<()> {
     let mut frame_task = tokio::spawn(start_frame_listener(frame_listener, state.clone()));
     let mut command_task = tokio::spawn(start_command_listener(command_listener, state.clone()));
 
-    let app = Router::new()
-        .route("/", get(ws_handler))
-        .with_state(state);
+    let app = Router::new().route("/", get(ws_handler)).with_state(state);
 
     tracing::info!("Rust WebSocket server listening on {}", addr);
     let mut ws_task = tokio::spawn(async move { axum::serve(ws_listener, app).await });
@@ -67,5 +62,7 @@ async fn main() -> std::io::Result<()> {
         res = &mut ws_task => tracing::error!("WebSocket server stopped: {:?}", res),
     }
 
-    Err(std::io::Error::other("a listener task terminated unexpectedly"))
+    Err(std::io::Error::other(
+        "a listener task terminated unexpectedly",
+    ))
 }

@@ -108,7 +108,8 @@ fn spawn_encoder(state: Arc<AppState>, user_id: String) -> watch::Sender<Bytes> 
         while frame_rx.changed().await.is_ok() {
             let frame = frame_rx.borrow_and_update().clone();
             // Offload CPU-heavy encoding to the blocking thread pool.
-            let Ok(payload) = tokio::task::spawn_blocking(move || frame_payload(&frame)).await else {
+            let Ok(payload) = tokio::task::spawn_blocking(move || frame_payload(&frame)).await
+            else {
                 continue;
             };
 
@@ -163,7 +164,10 @@ mod tests {
 
         assert!(received.len() < 50);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(rx.try_recv().is_err(), "an older frame arrived after the newest");
+        assert!(
+            rx.try_recv().is_err(),
+            "an older frame arrived after the newest"
+        );
     }
 
     #[tokio::test]

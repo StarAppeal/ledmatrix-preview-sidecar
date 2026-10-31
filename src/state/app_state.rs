@@ -35,6 +35,8 @@ enum DeviceSession {
 pub struct Room {
     pub png_tx: broadcast::Sender<String>,
     pub raw_tx: broadcast::Sender<Bytes>,
+    // Fires when a device session could not be started, so every viewer reconnects
+    start_failed_tx: broadcast::Sender<()>,
     pub png_viewers: usize,
     pub raw_viewers: usize,
     pub last_frame: Option<Bytes>,
@@ -48,6 +50,7 @@ impl Room {
         Room {
             png_tx: broadcast::channel(16).0,
             raw_tx: broadcast::channel(16).0,
+            start_failed_tx: broadcast::channel(1).0,
             png_viewers: 0,
             raw_viewers: 0,
             last_frame: None,
@@ -68,6 +71,7 @@ pub enum ViewerRx {
 
 pub struct Joined {
     pub rx: ViewerRx,
+    pub start_failed_rx: broadcast::Receiver<()>,
     pub cached_frame: Option<Bytes>,
     /// Set for the viewer that has to start the device session, see `finish_device_start`.
     pub start_ticket: Option<u64>,
@@ -135,13 +139,14 @@ impl AppState {
 
         Ok(Joined {
             rx,
+            start_failed_rx: room.start_failed_tx.subscribe(),
             cached_frame: room.last_frame.clone(),
             start_ticket,
         })
     }
 
-    /// Sends `device_connect` with the fetched token, or puts the room back to idle without one,
-    /// so the next viewer tries again. Returns whether the session was started.
+    /// Sends `device_connect` with the fetched token, or puts the room back to idle without one
+    /// and tells all viewers to reconnect, so the next one tries again. Returns whether the session was started.
     pub fn finish_device_start(&self, room_id: &str, ticket: u64, token: Option<&str>) -> bool {
         let Some(mut room) = self.ws_clients.get_mut(room_id) else {
             return false;
@@ -158,6 +163,7 @@ impl AppState {
             }
             None => {
                 room.session = DeviceSession::Idle;
+                let _ = room.start_failed_tx.send(());
                 false
             }
         }
@@ -349,6 +355,28 @@ mod tests {
 
         let second = state.join_room(DEV, FrameFormat::Raw).unwrap();
         assert!(second.start_ticket.is_some());
+    }
+
+    #[test]
+    fn a_failed_start_notifies_the_viewers_that_joined_meanwhile() {
+        let (state, _rx) = test_state();
+
+        let first = state.join_room(DEV, FrameFormat::Raw).unwrap();
+        let mut waiting = state.join_room(DEV, FrameFormat::Raw).unwrap();
+        assert!(waiting.start_failed_rx.try_recv().is_err());
+
+        state.finish_device_start(DEV, first.start_ticket.unwrap(), None);
+        assert!(waiting.start_failed_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn a_successful_start_does_not_notify_viewers() {
+        let (state, _rx) = test_state();
+
+        let first = state.join_room(DEV, FrameFormat::Raw).unwrap();
+        let mut waiting = state.join_room(DEV, FrameFormat::Raw).unwrap();
+        state.finish_device_start(DEV, first.start_ticket.unwrap(), Some("t"));
+        assert!(waiting.start_failed_rx.try_recv().is_err());
     }
 
     #[tokio::test]
