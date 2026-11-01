@@ -18,6 +18,10 @@ impl TokenBucket {
         }
     }
 
+    fn refund(&mut self, amount: f64) {
+        self.tokens = (self.tokens + amount).min(self.capacity);
+    }
+
     pub fn try_take(&mut self, amount: f64) -> bool {
         self.try_take_at(amount, Instant::now())
     }
@@ -50,7 +54,15 @@ impl ViewerLimiter {
     }
 
     pub fn allow(&mut self, size: usize) -> bool {
-        self.messages.try_take(1.0) && self.bytes.try_take(size as f64)
+        if !self.messages.try_take(1.0) {
+            return false;
+        }
+        if self.bytes.try_take(size as f64) {
+            return true;
+        }
+        // A rejected message must not use up the message budget of the small ones that follow
+        self.messages.refund(1.0);
+        false
     }
 }
 
@@ -75,6 +87,15 @@ mod tests {
         let mut limiter = ViewerLimiter::new();
         let allowed = (0..1000).filter(|_| limiter.allow(10)).count();
         assert!((60..=70).contains(&allowed), "allowed {}", allowed);
+    }
+
+    #[test]
+    fn rejected_large_messages_keep_the_message_budget() {
+        let mut limiter = ViewerLimiter::new();
+        for _ in 0..1000 {
+            assert!(!limiter.allow(10 * 1024 * 1024));
+        }
+        assert!(limiter.allow(10));
     }
 
     #[test]
