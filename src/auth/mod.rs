@@ -21,16 +21,41 @@ pub fn http_client() -> reqwest::Client {
         .expect("static reqwest config is valid")
 }
 
-pub async fn verify_token(client: &reqwest::Client, token: &str, backend_url: &str) -> String {
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthError {
+    /// The backend answered and the token or access is not valid; retrying won't help.
+    Rejected,
+    /// The backend could not be reached or answered with a server error; a retry may work.
+    Unavailable,
+}
+
+pub async fn verify_token(
+    client: &reqwest::Client,
+    token: &str,
+    backend_url: &str,
+) -> Result<String, AuthError> {
     let url = format!("{}/api/user/me", backend_url);
-    if let Ok(res) = client.get(&url).bearer_auth(token).send().await {
-        if let Ok(json) = res.json::<serde_json::Value>().await {
-            if let Some(id) = json["data"]["_id"].as_str() {
-                return id.to_string();
-            }
-        }
+    let res = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| AuthError::Unavailable)?;
+    let status = res.status();
+    if status.is_server_error() {
+        return Err(AuthError::Unavailable);
     }
-    String::new()
+    if !status.is_success() {
+        return Err(AuthError::Rejected);
+    }
+    let json = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| AuthError::Unavailable)?;
+    json["data"]["_id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or(AuthError::Rejected)
 }
 
 pub fn is_object_id(id: &str) -> bool {
@@ -43,19 +68,30 @@ pub async fn owns_virtual_device(
     token: &str,
     backend_url: &str,
     device_id: &str,
-) -> bool {
+) -> Result<bool, AuthError> {
     let url = format!("{}/api/devices", backend_url);
-    let Ok(res) = client.get(&url).bearer_auth(token).send().await else {
-        return false;
-    };
-    let Ok(json) = res.json::<serde_json::Value>().await else {
-        return false;
-    };
-    json["data"].as_array().is_some_and(|devices| {
+    let res = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| AuthError::Unavailable)?;
+    let status = res.status();
+    if status.is_server_error() {
+        return Err(AuthError::Unavailable);
+    }
+    if !status.is_success() {
+        return Err(AuthError::Rejected);
+    }
+    let json = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| AuthError::Unavailable)?;
+    Ok(json["data"].as_array().is_some_and(|devices| {
         devices
             .iter()
             .any(|device| device["id"] == device_id && device["kind"] == "virtual")
-    })
+    }))
 }
 
 /// Fetches a fresh device token. Rotating it closes a running session of the device,

@@ -20,15 +20,28 @@ async fn main() -> std::io::Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
     if tcp_secret.is_none() {
+        if std::env::var("PREVIEW_ALLOW_INSECURE_TCP").as_deref() != Ok("1") {
+            return Err(std::io::Error::other(
+                "PREVIEW_TCP_SECRET is not set; set it, or PREVIEW_ALLOW_INSECURE_TCP=1 for local development",
+            ));
+        }
         tracing::warn!("PREVIEW_TCP_SECRET is not set, TCP ports 5001/5002 accept any client");
     }
 
-    let max_device_rooms = std::env::var("MAX_DEVICE_SESSIONS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(50);
+    let max_device_rooms = match std::env::var("MAX_DEVICE_SESSIONS") {
+        Err(_) => 50,
+        Ok(value) => match value.trim().parse::<usize>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                return Err(std::io::Error::other(format!(
+                    "MAX_DEVICE_SESSIONS must be a positive integer, got {:?}",
+                    value
+                )))
+            }
+        },
+    };
 
-    let (cmd_tx, _) = tokio::sync::broadcast::channel(100);
+    let (cmd_tx, _) = tokio::sync::broadcast::channel(1024);
     let state = Arc::new(AppState {
         ws_clients: dashmap::DashMap::new(),
         cmd_tx,
@@ -39,6 +52,7 @@ async fn main() -> std::io::Result<()> {
         resync_tx: tokio::sync::watch::channel(0).0,
         max_device_rooms,
         device_grace: std::time::Duration::from_secs(60),
+        device_join_lock: std::sync::Mutex::new(()),
     });
 
     // Bind everything up front so a taken port fails startup instead of
