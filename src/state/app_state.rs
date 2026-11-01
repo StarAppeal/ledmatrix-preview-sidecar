@@ -93,6 +93,8 @@ pub struct AppState {
     pub resync_tx: watch::Sender<u64>,
     pub max_device_rooms: usize,
     pub device_grace: Duration,
+    // Makes "count device rooms, then create one" atomic, see `join_room`
+    pub device_join_lock: std::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -102,6 +104,13 @@ impl AppState {
     // preview service in the same order as the room changes.
     pub fn join_room(&self, room_id: &str, format: FrameFormat) -> Result<Joined, Busy> {
         let device = is_device_room(room_id);
+        // Without this, concurrent joins of new device rooms all pass the limit check together.
+        // Rooms are only ever removed elsewhere, which can't push the count over the limit.
+        let _device_guard = device.then(|| {
+            self.device_join_lock
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
         if device
             && !self.ws_clients.contains_key(room_id)
             && self.device_room_count() >= self.max_device_rooms
@@ -263,6 +272,7 @@ pub fn test_state() -> (Arc<AppState>, broadcast::Receiver<String>) {
         resync_tx: watch::channel(0).0,
         max_device_rooms: 2,
         device_grace: Duration::from_millis(50),
+        device_join_lock: std::sync::Mutex::new(()),
     };
     (Arc::new(state), cmd_rx)
 }

@@ -11,9 +11,12 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::{
-    auth::{is_object_id, owns_virtual_device, start_device_session, verify_token, AuthMsg},
+    auth::{
+        is_object_id, owns_virtual_device, start_device_session, verify_token, AuthError, AuthMsg,
+    },
     net::frame_payload,
     state::{is_device_room, AppState, FrameFormat, ViewerRx, DEVICE_ROOM_PREFIX},
+    util::rate_limit::ViewerLimiter,
 };
 
 // Legit binaries are 64x64 frames; this caps what reaches the preview decoder.
@@ -47,20 +50,19 @@ fn frame_message(format: FrameFormat, frame: axum::body::Bytes) -> Message {
     }
 }
 
-async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Option<Viewer> {
+async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<Viewer, AuthError> {
     let Ok(Some(Ok(Message::Text(msg)))) = tokio::time::timeout(AUTH_TIMEOUT, socket.next()).await
     else {
-        return None;
+        return Err(AuthError::Rejected);
     };
     let auth = serde_json::from_str::<AuthMsg>(&msg)
         .ok()
-        .filter(|auth| auth.msg_type == "AUTH")?;
+        .filter(|auth| auth.msg_type == "AUTH")
+        .ok_or(AuthError::Rejected)?;
 
-    let user_id = verify_token(&state.http, &auth.token, &state.backend_url).await;
-    if user_id.is_empty() {
-        tracing::warn!("WebSocket auth failed: empty user_id");
-        return None;
-    }
+    let user_id = verify_token(&state.http, &auth.token, &state.backend_url)
+        .await
+        .inspect_err(|err| tracing::warn!("WebSocket auth failed: {:?}", err))?;
 
     let format = match auth.format.as_deref() {
         Some("raw") => FrameFormat::Raw,
@@ -70,18 +72,18 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Option<Viewer
     let room_id = match auth.device {
         None => user_id,
         Some(device_id) => {
-            if !is_object_id(&device_id)
-                || !owns_virtual_device(&state.http, &auth.token, &state.backend_url, &device_id)
-                    .await
-            {
+            let owned = is_object_id(&device_id)
+                && owns_virtual_device(&state.http, &auth.token, &state.backend_url, &device_id)
+                    .await?;
+            if !owned {
                 tracing::warn!("User {} may not watch device {}", user_id, device_id);
-                return None;
+                return Err(AuthError::Rejected);
             }
             format!("{}{}", DEVICE_ROOM_PREFIX, device_id)
         }
     };
 
-    Some(Viewer {
+    Ok(Viewer {
         room_id,
         format,
         jwt: auth.token,
@@ -89,9 +91,17 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Option<Viewer
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
-    let Some(viewer) = authenticate(&mut socket, &state).await else {
-        let _ = socket.send(text(json!({"type": "ERROR"}))).await;
-        return;
+    let viewer = match authenticate(&mut socket, &state).await {
+        Ok(viewer) => viewer,
+        Err(AuthError::Rejected) => {
+            let _ = socket.send(text(json!({"type": "ERROR"}))).await;
+            return;
+        }
+        // The client treats ERROR as final; START_FAILED makes it reconnect with backoff
+        Err(AuthError::Unavailable) => {
+            let _ = socket.send(text(json!({"type": "START_FAILED"}))).await;
+            return;
+        }
     };
     let room_id = viewer.room_id.clone();
     let format = viewer.format;
@@ -153,8 +163,19 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     // Virtual devices only follow the backend; their viewers are read just to notice the close.
     let forward_input = !is_device_room(&room_id);
     let mut recv_task = tokio::spawn(async move {
+        let mut limiter = ViewerLimiter::new();
         while let Some(msg_result) = receiver.next().await {
             if !forward_input {
+                continue;
+            }
+            // A flooding viewer must not fill the shared command channel, which resyncs everyone
+            let size = match &msg_result {
+                Ok(Message::Text(text)) => text.len(),
+                Ok(Message::Binary(bin)) => bin.len(),
+                _ => 0,
+            };
+            if size > 0 && !limiter.allow(size) {
+                tracing::debug!("Dropping message of {} over the rate limit", uid_clone);
                 continue;
             }
             match msg_result {
