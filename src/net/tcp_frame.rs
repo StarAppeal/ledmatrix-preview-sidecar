@@ -1,6 +1,10 @@
 use axum::body::Bytes;
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{io::AsyncReadExt, net::TcpListener, sync::watch};
 
 use crate::{
@@ -8,6 +12,8 @@ use crate::{
     state::AppState,
     util::encode_fast_png,
 };
+
+const ENCODER_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
     tracing::info!("TCP frame server started on port 5001");
@@ -29,6 +35,7 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
             }
             tracing::info!("TCP frame client connected from {}", peer_addr);
             let mut encoders: HashMap<String, watch::Sender<Bytes>> = HashMap::new();
+            let mut last_prune = Instant::now();
             let mut len_buf = [0u8; 1];
             loop {
                 // Protocol: 1 byte user-id length, N bytes user-id, 12288 bytes RGB data
@@ -66,6 +73,13 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
                         err
                     );
                     break;
+                }
+
+                // Dropping a sender ends its encoder task; rooms that vanished without another
+                // frame for their user would otherwise keep it waiting for this connection's lifetime
+                if last_prune.elapsed() >= ENCODER_PRUNE_INTERVAL {
+                    encoders.retain(|id, _| state.ws_clients.contains_key(id));
+                    last_prune = Instant::now();
                 }
 
                 let frame = Bytes::from(frame_buf);
