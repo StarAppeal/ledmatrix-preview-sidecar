@@ -258,3 +258,99 @@ async fn forward<T: Clone, S>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{state::test_state_with, util::ip_limits::IpLimits};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{self, client::IntoClientRequest, handshake::client::Request},
+    };
+
+    async fn serve(limits: IpLimits) -> (Arc<AppState>, String) {
+        let (state, _) = test_state_with(limits);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(ws_handler))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+        (state, url)
+    }
+
+    fn request(url: &str, cf_ip: Option<&str>) -> Request {
+        let mut req = url.into_client_request().unwrap();
+        if let Some(ip) = cf_ip {
+            req.headers_mut()
+                .insert("cf-connecting-ip", ip.parse().unwrap());
+        }
+        req
+    }
+
+    async fn is_refused(req: Request) -> bool {
+        match connect_async(req).await {
+            Err(tungstenite::Error::Http(res)) => res.status() == StatusCode::TOO_MANY_REQUESTS,
+            _ => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_connections_over_the_per_ip_cap() {
+        let (_, url) = serve(IpLimits::new(1, 30)).await;
+        let _first = connect_async(request(&url, Some("203.0.113.7")))
+            .await
+            .unwrap();
+
+        assert!(is_refused(request(&url, Some("203.0.113.7"))).await);
+        assert!(connect_async(request(&url, Some("203.0.113.8")))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn frees_the_slot_when_a_socket_closes_before_auth() {
+        let (_, url) = serve(IpLimits::new(1, 30)).await;
+        let (mut ws, _) = connect_async(request(&url, None)).await.unwrap();
+        assert!(is_refused(request(&url, None)).await);
+
+        ws.close(None).await.unwrap();
+        let reconnected = tokio::time::timeout(Duration::from_secs(2), async {
+            while connect_async(request(&url, None)).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(reconnected.is_ok(), "slot was not released");
+    }
+
+    #[tokio::test]
+    async fn answers_rate_limited_before_asking_the_backend() {
+        let (state, url) = serve(IpLimits::new(10, 1)).await;
+        assert!(state.ip_limits.allow_auth("127.0.0.1".parse().unwrap()));
+
+        let (mut ws, _) = connect_async(request(&url, None)).await.unwrap();
+        let auth = json!({"type": "AUTH", "token": "token"}).to_string();
+        ws.send(tungstenite::Message::text(auth)).await.unwrap();
+
+        let reply = ws.next().await.unwrap().unwrap();
+        let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+        assert_eq!(reply, json!({"type": "RATE_LIMITED"}));
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(msg)) = ws.next().await {
+                if msg.is_close() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "socket stayed open");
+    }
+}
