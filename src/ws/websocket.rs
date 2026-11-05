@@ -1,13 +1,18 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, State,
     },
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::{
@@ -16,7 +21,7 @@ use crate::{
     },
     net::frame_payload,
     state::{is_device_room, AppState, FrameFormat, ViewerRx, DEVICE_ROOM_PREFIX},
-    util::rate_limit::ViewerLimiter,
+    util::{client_ip::client_ip, ip_limits::ConnGuard, rate_limit::ViewerLimiter},
 };
 
 // Legit binaries are 64x64 frames; this caps what reaches the preview decoder.
@@ -26,10 +31,17 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let ip = client_ip(&headers, peer);
+    let Some(guard) = state.ip_limits.try_acquire(ip) else {
+        tracing::warn!("Too many connections from {}, refusing", ip);
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     ws.max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(|socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| handle_socket(socket, state, ip, guard))
 }
 
 struct Viewer {
@@ -50,7 +62,11 @@ fn frame_message(format: FrameFormat, frame: axum::body::Bytes) -> Message {
     }
 }
 
-async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<Viewer, AuthError> {
+async fn authenticate(
+    socket: &mut WebSocket,
+    state: &AppState,
+    ip: IpAddr,
+) -> Result<Viewer, AuthError> {
     let Ok(Some(Ok(Message::Text(msg)))) = tokio::time::timeout(AUTH_TIMEOUT, socket.next()).await
     else {
         return Err(AuthError::Rejected);
@@ -59,6 +75,11 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<Viewer
         .ok()
         .filter(|auth| auth.msg_type == "AUTH")
         .ok_or(AuthError::Rejected)?;
+
+    if !state.ip_limits.allow_auth(ip) {
+        tracing::warn!("Too many AUTH attempts from {}", ip);
+        return Err(AuthError::RateLimited);
+    }
 
     let user_id = verify_token(&state.http, &auth.token, &state.backend_url)
         .await
@@ -90,8 +111,9 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<Viewer
     })
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
-    let viewer = match authenticate(&mut socket, &state).await {
+// The guard holds this connection's slot in the per-IP limit until the socket closes
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, ip: IpAddr, _guard: ConnGuard) {
+    let viewer = match authenticate(&mut socket, &state, ip).await {
         Ok(viewer) => viewer,
         Err(AuthError::Rejected) => {
             let _ = socket.send(text(json!({"type": "ERROR"}))).await;
@@ -100,6 +122,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         // The client treats ERROR as final; START_FAILED makes it reconnect with backoff
         Err(AuthError::Unavailable) => {
             let _ = socket.send(text(json!({"type": "START_FAILED"}))).await;
+            return;
+        }
+        // Unknown to older clients; they reconnect with backoff once the socket closes
+        Err(AuthError::RateLimited) => {
+            let _ = socket.send(text(json!({"type": "RATE_LIMITED"}))).await;
             return;
         }
     };

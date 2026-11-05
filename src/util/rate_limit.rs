@@ -22,6 +22,11 @@ impl TokenBucket {
         self.tokens = (self.tokens + amount).min(self.capacity);
     }
 
+    pub fn is_full(&self) -> bool {
+        let elapsed = self.last.elapsed().as_secs_f64();
+        self.tokens + elapsed * self.per_second >= self.capacity
+    }
+
     pub fn try_take(&mut self, amount: f64) -> bool {
         self.try_take_at(amount, Instant::now())
     }

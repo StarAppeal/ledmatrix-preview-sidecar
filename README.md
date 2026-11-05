@@ -19,6 +19,13 @@ This service bridges WebSocket clients and a Rust backend for LED matrix preview
    {"type":"AUTH_SUCCESS"}
 3. On failure, server responds:
    {"type":"ERROR"}
+4. Too many AUTH attempts from the client address, server responds and closes (retry later):
+   {"type":"RATE_LIMITED"}
+
+Connections over the per-address cap are refused with HTTP 429 before the upgrade.
+The client address is `CF-Connecting-IP` if it holds a valid IP, otherwise the TCP peer, so
+only cloudflared and internal services may reach port 8765 in production. IPv6 addresses
+count per /56.
 
 Subsequent client messages are forwarded to Rust as JSON (see below).
 
@@ -40,6 +47,8 @@ The service sends newline-delimited JSON:
 ## Configuration
 Environment variables:
 - BACKEND_INTERNAL_URL (default: http://ledmatrix-backend:3000)
+- MAX_CONNECTIONS_PER_IP (default: 10) – open WebSockets per client address
+- MAX_AUTH_PER_IP_MINUTE (default: 30) – AUTH attempts per client address and minute
 
 ## Build and Run
 ### Docker

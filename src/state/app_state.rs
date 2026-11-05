@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 
+use crate::util::ip_limits::IpLimits;
+
 // Rooms of virtual devices; user ids are Mongo ids and never contain ':'
 pub const DEVICE_ROOM_PREFIX: &str = "dev:";
 
@@ -95,6 +97,7 @@ pub struct AppState {
     pub device_grace: Duration,
     // Makes "count device rooms, then create one" atomic, see `join_room`
     pub device_join_lock: std::sync::Mutex<()>,
+    pub ip_limits: IpLimits,
 }
 
 impl AppState {
@@ -273,6 +276,7 @@ pub fn test_state() -> (Arc<AppState>, broadcast::Receiver<String>) {
         max_device_rooms: 2,
         device_grace: Duration::from_millis(50),
         device_join_lock: std::sync::Mutex::new(()),
+        ip_limits: IpLimits::new(10, 30),
     };
     (Arc::new(state), cmd_rx)
 }
