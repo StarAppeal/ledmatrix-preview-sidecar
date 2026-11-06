@@ -27,6 +27,8 @@ pub enum AuthError {
     Rejected,
     /// The backend could not be reached or answered with a server error; a retry may work.
     Unavailable,
+    /// Too many AUTH attempts from this address; the client should retry later.
+    RateLimited,
 }
 
 pub async fn verify_token(
