@@ -98,6 +98,8 @@ pub struct AppState {
     // Makes "count device rooms, then create one" atomic, see `join_room`
     pub device_join_lock: std::sync::Mutex<()>,
     pub ip_limits: IpLimits,
+    // The token is only checked on AUTH; closing after this makes the client come back with a fresh one
+    pub max_connection_age: Duration,
 }
 
 impl AppState {
@@ -282,6 +284,7 @@ pub fn test_state_with(ip_limits: IpLimits) -> (Arc<AppState>, broadcast::Receiv
         device_grace: Duration::from_millis(50),
         device_join_lock: std::sync::Mutex::new(()),
         ip_limits,
+        max_connection_age: Duration::from_secs(3600),
     };
     (Arc::new(state), cmd_rx)
 }

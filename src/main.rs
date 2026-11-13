@@ -32,6 +32,7 @@ async fn main() -> std::io::Result<()> {
     let max_device_rooms = positive_env("MAX_DEVICE_SESSIONS", 50)?;
     let max_conns_per_ip = positive_env("MAX_CONNECTIONS_PER_IP", 10)?;
     let max_auth_per_ip_minute = positive_env("MAX_AUTH_PER_IP_MINUTE", 30)?;
+    let max_connection_minutes = positive_env("MAX_CONNECTION_MINUTES", 60)?;
 
     let (cmd_tx, _) = tokio::sync::broadcast::channel(1024);
     let state = Arc::new(AppState {
@@ -46,6 +47,7 @@ async fn main() -> std::io::Result<()> {
         device_grace: Duration::from_secs(60),
         device_join_lock: std::sync::Mutex::new(()),
         ip_limits: IpLimits::new(max_conns_per_ip, max_auth_per_ip_minute),
+        max_connection_age: Duration::from_secs(60 * max_connection_minutes as u64),
     });
 
     // Bind everything up front so a taken port fails startup instead of

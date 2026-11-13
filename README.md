@@ -49,6 +49,7 @@ Environment variables:
 - BACKEND_INTERNAL_URL (default: http://ledmatrix-backend:3000)
 - MAX_CONNECTIONS_PER_IP (default: 10) – open WebSockets per client address
 - MAX_AUTH_PER_IP_MINUTE (default: 30) – AUTH attempts per client address and minute
+- MAX_CONNECTION_MINUTES (default: 60) – a WebSocket is closed after this time; clients reconnect with a fresh token
 
 ## Build and Run
 ### Docker
