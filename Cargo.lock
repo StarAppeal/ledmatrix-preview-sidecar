@@ -1231,6 +1231,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dashmap",
+ "flate2",
  "futures-util",
  "png",
  "reqwest",

@@ -14,7 +14,12 @@ This service bridges WebSocket clients and a Rust backend for LED matrix preview
 ## Protocols
 ### WebSocket (client -> service)
 1. Client must send an AUTH message first:
-   {"type":"AUTH","token":"<jwt>"}
+   {"type":"AUTH","token":"<jwt>","device":"<virtual device id, optional>","format":"png|raw|deflate"}
+
+   `format` picks how frames arrive: `png` (default) as `PREVIEW_FRAME` text messages, `raw` as
+   binary 12288-byte RGB frames, `deflate` as the same raw frames, raw-deflated (RFC 1951). A
+   mostly dark frame shrinks from 12 KiB to a few hundred bytes, which matters because every
+   viewer gets up to 30 frames per second.
 2. On success, server responds:
    {"type":"AUTH_SUCCESS"}
 3. On failure, server responds:
@@ -35,7 +40,7 @@ Binary protocol:
 - N bytes: user_id (UTF-8)
 - 12288 bytes: raw RGB data (64x64x3)
 
-The service encodes the frame as PNG and sends to the matching WebSocket client:
+The service sends the frame to the matching WebSocket clients in their format, for PNG viewers as:
 {"type":"PREVIEW_FRAME","payload":"data:image/png;base64,<...>"}
 
 ### TCP commands (service -> Rust) on port 5002
@@ -50,6 +55,16 @@ Environment variables:
 - MAX_CONNECTIONS_PER_IP (default: 10) – open WebSockets per client address
 - MAX_AUTH_PER_IP_MINUTE (default: 30) – AUTH attempts per client address and minute
 - MAX_CONNECTION_MINUTES (default: 60) – a WebSocket is closed after this time; clients reconnect with a fresh token
+- MAX_DEVICE_SESSIONS (default: 50) – virtual matrices running at once; further ones get `{"type":"BUSY"}`
+
+## Health
+`GET /healthz` on port 8765 answers
+`{"status":"ok|degraded","preview_connected":true,"frame_link":true,"device_sessions":3,"max_device_sessions":50,"viewers":4}`.
+`degraded` means the preview service's command socket (port 5002) is not connected. The frame
+socket (port 5001) is only opened once there is a frame to send, so `frame_link` may be `false`
+while idle and does not affect the status. Requests with a
+`CF-Connecting-IP` header (everything coming through Cloudflare) get a 404, so only the backend
+and Docker see it. `rust-preview healthcheck` probes it from inside the container (the image has no curl).
 
 ## Build and Run
 ### Docker

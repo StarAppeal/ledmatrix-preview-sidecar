@@ -9,7 +9,7 @@ use tokio::{io::AsyncReadExt, net::TcpListener, sync::watch};
 
 use crate::{
     net::{handshake::authenticate, ACCEPT_RETRY_DELAY},
-    state::AppState,
+    state::{AppState, PreviewLink},
     util::encode_fast_png,
 };
 
@@ -34,6 +34,7 @@ pub async fn start_frame_listener(listener: TcpListener, state: Arc<AppState>) {
                 return;
             }
             tracing::info!("TCP frame client connected from {}", peer_addr);
+            let _link = state.track_preview_link(PreviewLink::Frame);
             let mut encoders: HashMap<String, watch::Sender<Bytes>> = HashMap::new();
             let mut last_prune = Instant::now();
             let mut len_buf = [0u8; 1];
