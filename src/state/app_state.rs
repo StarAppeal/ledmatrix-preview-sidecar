@@ -1,7 +1,7 @@
 use axum::body::Bytes;
 use dashmap::DashMap;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
@@ -82,6 +82,53 @@ pub struct Joined {
 #[derive(Debug)]
 pub struct Busy;
 
+#[derive(Clone, Copy)]
+pub enum PreviewLink {
+    Command,
+    Frame,
+}
+
+/// Open TCP connections of the preview service, reported by the health endpoint.
+#[derive(Default)]
+pub struct PreviewLinks {
+    command: AtomicUsize,
+    frame: AtomicUsize,
+}
+
+impl PreviewLinks {
+    fn counter(&self, link: PreviewLink) -> &AtomicUsize {
+        match link {
+            PreviewLink::Command => &self.command,
+            PreviewLink::Frame => &self.frame,
+        }
+    }
+
+    /// The preview service keeps its command socket open and reconnects it at once; the frame
+    /// socket is only reopened once it has a frame to send, so it may be missing while idle.
+    pub fn connected(&self) -> bool {
+        self.command.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn frame_connected(&self) -> bool {
+        self.frame.load(Ordering::Relaxed) > 0
+    }
+}
+
+/// Counts a preview connection for as long as it lives.
+pub struct PreviewLinkGuard {
+    state: Arc<AppState>,
+    link: PreviewLink,
+}
+
+impl Drop for PreviewLinkGuard {
+    fn drop(&mut self) {
+        self.state
+            .preview_links
+            .counter(self.link)
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 // Shared state for WebSocket clients and command broadcasting.
 pub struct AppState {
     // room id (user id or dev:<device id>) -> Room
@@ -100,9 +147,33 @@ pub struct AppState {
     pub ip_limits: IpLimits,
     // The token is only checked on AUTH; closing after this makes the client come back with a fresh one
     pub max_connection_age: Duration,
+    pub preview_links: PreviewLinks,
 }
 
 impl AppState {
+    pub fn track_preview_link(self: &Arc<Self>, link: PreviewLink) -> PreviewLinkGuard {
+        self.preview_links
+            .counter(link)
+            .fetch_add(1, Ordering::Relaxed);
+        PreviewLinkGuard {
+            state: self.clone(),
+            link,
+        }
+    }
+
+    pub fn health(&self) -> serde_json::Value {
+        let preview_connected = self.preview_links.connected();
+        let viewers: usize = self.ws_clients.iter().map(|room| room.viewers()).sum();
+        json!({
+            "status": if preview_connected { "ok" } else { "degraded" },
+            "preview_connected": preview_connected,
+            "frame_link": self.preview_links.frame_connected(),
+            "device_sessions": self.device_room_count(),
+            "max_device_sessions": self.max_device_rooms,
+            "viewers": viewers,
+        })
+    }
+
     /// Registers a socket in the room. Preview rooms start their session on the first viewer;
     /// device rooms hand a start ticket to the viewer that has to fetch a device token.
     // Commands are sent while holding the entry lock so they reach the
@@ -285,6 +356,7 @@ pub fn test_state_with(ip_limits: IpLimits) -> (Arc<AppState>, broadcast::Receiv
         device_join_lock: std::sync::Mutex::new(()),
         ip_limits,
         max_connection_age: Duration::from_secs(3600),
+        preview_links: PreviewLinks::default(),
     };
     (Arc::new(state), cmd_rx)
 }

@@ -337,6 +337,7 @@ mod tests {
             device_join_lock: std::sync::Mutex::new(()),
             ip_limits: IpLimits::new(10, 30),
             max_connection_age: Duration::from_millis(200),
+            preview_links: Default::default(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/", listener.local_addr().unwrap());

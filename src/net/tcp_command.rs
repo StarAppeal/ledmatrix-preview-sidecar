@@ -1,9 +1,13 @@
 use std::sync::Arc;
-use tokio::{io::AsyncWriteExt, net::TcpListener, sync::broadcast::error::RecvError};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::broadcast::error::RecvError,
+};
 
 use crate::{
     net::{handshake::authenticate, ACCEPT_RETRY_DELAY},
-    state::AppState,
+    state::{AppState, PreviewLink},
 };
 
 pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>) {
@@ -25,11 +29,23 @@ pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>)
                 return;
             }
             tracing::info!("TCP command client connected from {}", peer_addr);
+            let _link = state.track_preview_link(PreviewLink::Command);
             let mut rx = state.cmd_tx.subscribe();
             state.reset_device_sessions();
             state.resync_tx.send_modify(|generation| *generation += 1);
+            let (mut reader, mut writer) = socket.into_split();
+            let mut probe = [0u8; 64];
             loop {
-                let msg = match rx.recv().await {
+                let received = tokio::select! {
+                    received = rx.recv() => received,
+                    // The preview service never writes after the handshake; EOF means it is gone,
+                    // which the health check has to see even while no command is being sent
+                    read = reader.read(&mut probe) => match read {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    },
+                };
+                let msg = match received {
                     Ok(msg) => msg,
                     // Lost commands would desync the sessions; closing makes the preview
                     // service drop them and reconnect, which triggers a full resync.
@@ -43,7 +59,7 @@ pub async fn start_command_listener(listener: TcpListener, state: Arc<AppState>)
                     }
                     Err(RecvError::Closed) => break,
                 };
-                if socket.write_all(msg.as_bytes()).await.is_err() {
+                if writer.write_all(msg.as_bytes()).await.is_err() {
                     break;
                 }
             }

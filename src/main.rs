@@ -3,6 +3,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 
 mod auth;
+mod health;
 mod net;
 mod state;
 mod util;
@@ -15,6 +16,9 @@ use ws::ws_handler;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return health::run_healthcheck().await;
+    }
     tracing_subscriber::fmt::init();
 
     let tcp_secret = std::env::var("PREVIEW_TCP_SECRET")
@@ -48,6 +52,7 @@ async fn main() -> std::io::Result<()> {
         device_join_lock: std::sync::Mutex::new(()),
         ip_limits: IpLimits::new(max_conns_per_ip, max_auth_per_ip_minute),
         max_connection_age: Duration::from_secs(60 * max_connection_minutes as u64),
+        preview_links: Default::default(),
     });
 
     // Bind everything up front so a taken port fails startup instead of
@@ -62,6 +67,7 @@ async fn main() -> std::io::Result<()> {
 
     let app = Router::new()
         .route("/", get(ws_handler))
+        .route(health::HEALTH_PATH, get(health::health_handler))
         .with_state(state.clone());
 
     tracing::info!("Rust WebSocket server listening on {}", addr);
