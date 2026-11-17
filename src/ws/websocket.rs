@@ -21,7 +21,10 @@ use crate::{
     },
     net::frame_payload,
     state::{is_device_room, AppState, FrameFormat, ViewerRx, DEVICE_ROOM_PREFIX},
-    util::{client_ip::client_ip, ip_limits::ConnGuard, rate_limit::ViewerLimiter},
+    util::{
+        client_ip::client_ip, encoding::deflate_frame, ip_limits::ConnGuard,
+        rate_limit::ViewerLimiter,
+    },
 };
 
 // Legit binaries are 64x64 frames; this caps what reaches the preview decoder.
@@ -48,6 +51,8 @@ struct Viewer {
     // user id for the preview, dev:<device id> for a virtual device
     room_id: String,
     format: FrameFormat,
+    // Raw frames, deflated per viewer; the room only knows raw and PNG viewers
+    deflate: bool,
     jwt: String,
 }
 
@@ -55,9 +60,17 @@ fn text(value: serde_json::Value) -> Message {
     Message::Text(value.to_string().into())
 }
 
-fn frame_message(format: FrameFormat, frame: axum::body::Bytes) -> Message {
+fn raw_message(frame: axum::body::Bytes, deflate: bool) -> Message {
+    Message::Binary(if deflate {
+        deflate_frame(&frame)
+    } else {
+        frame
+    })
+}
+
+fn frame_message(format: FrameFormat, deflate: bool, frame: axum::body::Bytes) -> Message {
     match format {
-        FrameFormat::Raw => Message::Binary(frame),
+        FrameFormat::Raw => raw_message(frame, deflate),
         FrameFormat::Png => Message::Text(frame_payload(&frame).into()),
     }
 }
@@ -85,9 +98,10 @@ async fn authenticate(
         .await
         .inspect_err(|err| tracing::warn!("WebSocket auth failed: {:?}", err))?;
 
-    let format = match auth.format.as_deref() {
-        Some("raw") => FrameFormat::Raw,
-        _ => FrameFormat::Png,
+    let (format, deflate) = match auth.format.as_deref() {
+        Some("raw") => (FrameFormat::Raw, false),
+        Some("deflate") => (FrameFormat::Raw, true),
+        _ => (FrameFormat::Png, false),
     };
 
     let room_id = match auth.device {
@@ -107,6 +121,7 @@ async fn authenticate(
     Ok(Viewer {
         room_id,
         format,
+        deflate,
         jwt: auth.token,
     })
 }
@@ -132,6 +147,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, ip: IpAddr, 
     };
     let room_id = viewer.room_id.clone();
     let format = viewer.format;
+    let deflate = viewer.deflate;
 
     let mut resync_rx = state.resync_tx.subscribe();
     let joined = match state.join_room(&room_id, format) {
@@ -162,7 +178,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, ip: IpAddr, 
     tracing::info!("WebSocket client registered for {}", room_id);
     let _ = socket.send(text(json!({"type": "AUTH_SUCCESS"}))).await;
     if let Some(frame) = joined.cached_frame {
-        let _ = socket.send(frame_message(format, frame)).await;
+        let _ = socket.send(frame_message(format, deflate, frame)).await;
     }
 
     let (mut sender, mut receiver) = socket.split();
@@ -174,7 +190,9 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, ip: IpAddr, 
                 ViewerRx::Png(rx) => {
                     forward(rx, &mut sender, |msg| Message::Text(msg.into())).await
                 }
-                ViewerRx::Raw(rx) => forward(rx, &mut sender, Message::Binary).await,
+                ViewerRx::Raw(rx) => {
+                    forward(rx, &mut sender, |frame| raw_message(frame, deflate)).await
+                }
             }
         };
         tokio::select! {
@@ -268,9 +286,11 @@ async fn forward<T: Clone, S>(
 mod tests {
     use super::*;
     use crate::{state::test_state_with, util::ip_limits::IpLimits};
+    use tokio::net::TcpStream;
     use tokio_tungstenite::{
         connect_async,
         tungstenite::{self, client::IntoClientRequest, handshake::client::Request},
+        MaybeTlsStream, WebSocketStream,
     };
 
     async fn serve(limits: IpLimits) -> (Arc<AppState>, String) {
@@ -322,9 +342,8 @@ mod tests {
         url
     }
 
-    #[tokio::test]
-    async fn closes_an_authenticated_socket_after_the_maximum_connection_age() {
-        let (cmd_tx, _cmd_rx) = broadcast::channel(16);
+    async fn authenticated_server(max_connection_age: Duration) -> (Arc<AppState>, String) {
+        let (cmd_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
             ws_clients: dashmap::DashMap::new(),
             cmd_tx,
@@ -336,7 +355,7 @@ mod tests {
             device_grace: Duration::from_millis(50),
             device_join_lock: std::sync::Mutex::new(()),
             ip_limits: IpLimits::new(10, 30),
-            max_connection_age: Duration::from_millis(200),
+            max_connection_age,
             preview_links: Default::default(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -351,13 +370,59 @@ mod tests {
             )
             .await
         });
+        (state, url)
+    }
 
-        let (mut ws, _) = connect_async(request(&url, None)).await.unwrap();
-        let auth = json!({"type": "AUTH", "token": "token"}).to_string();
-        ws.send(tungstenite::Message::text(auth)).await.unwrap();
+    async fn auth(
+        url: &str,
+        auth: serde_json::Value,
+    ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+        let (mut ws, _) = connect_async(request(url, None)).await.unwrap();
+        ws.send(tungstenite::Message::text(auth.to_string()))
+            .await
+            .unwrap();
         let reply = ws.next().await.unwrap().unwrap();
         let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
         assert_eq!(reply, json!({"type": "AUTH_SUCCESS"}));
+        ws
+    }
+
+    #[tokio::test]
+    async fn sends_deflated_frames_to_viewers_that_ask_for_them() {
+        use flate2::read::DeflateDecoder;
+        use std::io::Read;
+
+        let (state, url) = authenticated_server(Duration::from_secs(60)).await;
+        let mut ws = auth(
+            &url,
+            json!({"type": "AUTH", "token": "token", "format": "deflate"}),
+        )
+        .await;
+
+        let mut frame = vec![0u8; 12288];
+        frame[300..360].fill(200);
+        state
+            .ws_clients
+            .get(USER_ID)
+            .unwrap()
+            .raw_tx
+            .send(axum::body::Bytes::from(frame.clone()))
+            .unwrap();
+
+        let msg = ws.next().await.unwrap().unwrap();
+        let compressed = msg.into_data();
+        assert!(compressed.len() < frame.len() / 10);
+        let mut restored = Vec::new();
+        DeflateDecoder::new(&compressed[..])
+            .read_to_end(&mut restored)
+            .unwrap();
+        assert_eq!(restored, frame);
+    }
+
+    #[tokio::test]
+    async fn closes_an_authenticated_socket_after_the_maximum_connection_age() {
+        let (state, url) = authenticated_server(Duration::from_millis(200)).await;
+        let mut ws = auth(&url, json!({"type": "AUTH", "token": "token"})).await;
         assert!(state.ws_clients.contains_key(USER_ID));
 
         let closed = tokio::time::timeout(Duration::from_secs(2), async {

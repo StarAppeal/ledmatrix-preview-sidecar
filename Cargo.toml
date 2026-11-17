@@ -15,6 +15,7 @@ base64 = "0.22"
 png = "0.18.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

@@ -8,7 +8,7 @@ pub struct AuthMsg {
     pub token: String,
     /// Watch this virtual device instead of the user's own preview.
     pub device: Option<String>,
-    /// `"raw"` for binary 64x64 RGB frames, anything else keeps PNG.
+    /// `"raw"` for binary 64x64 RGB frames, `"deflate"` for the same raw-deflated, anything else keeps PNG.
     pub format: Option<String>,
 }
 
