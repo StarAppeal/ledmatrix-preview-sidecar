@@ -24,4 +24,7 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 ENV PORT=8765
 EXPOSE 8765 5001 5002
 
+# Needs no root: it only listens on high ports and writes nothing
+USER 65534:65534
+
 CMD ["./rust-preview"]

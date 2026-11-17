@@ -232,6 +232,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, ip: IpAddr, 
             send_task.abort();
             recv_task.abort();
         }
+        _ = tokio::time::sleep(state.max_connection_age) => {
+            tracing::info!("Closing websocket for {} after the maximum connection age", room_id);
+            send_task.abort();
+            recv_task.abort();
+        }
     }
 
     if state.leave_room(&room_id, format) {
@@ -299,6 +304,78 @@ mod tests {
             Err(tungstenite::Error::Http(res)) => res.status() == StatusCode::TOO_MANY_REQUESTS,
             _ => false,
         }
+    }
+
+    const USER_ID: &str = "64b7f0c2a1b2c3d4e5f60718";
+
+    /// Answers `/api/user/me` like the backend does for a valid token.
+    async fn serve_backend() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/api/user/me",
+            axum::routing::get(|| async {
+                axum::Json(json!({"ok": true, "data": {"_id": USER_ID}}))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    #[tokio::test]
+    async fn closes_an_authenticated_socket_after_the_maximum_connection_age() {
+        let (cmd_tx, _cmd_rx) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            ws_clients: dashmap::DashMap::new(),
+            cmd_tx,
+            backend_url: serve_backend().await,
+            http: reqwest::Client::new(),
+            tcp_secret: None,
+            resync_tx: tokio::sync::watch::channel(0).0,
+            max_device_rooms: 2,
+            device_grace: Duration::from_millis(50),
+            device_join_lock: std::sync::Mutex::new(()),
+            ip_limits: IpLimits::new(10, 30),
+            max_connection_age: Duration::from_millis(200),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(ws_handler))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+        });
+
+        let (mut ws, _) = connect_async(request(&url, None)).await.unwrap();
+        let auth = json!({"type": "AUTH", "token": "token"}).to_string();
+        ws.send(tungstenite::Message::text(auth)).await.unwrap();
+        let reply = ws.next().await.unwrap().unwrap();
+        let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+        assert_eq!(reply, json!({"type": "AUTH_SUCCESS"}));
+        assert!(state.ws_clients.contains_key(USER_ID));
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(msg)) = ws.next().await {
+                if msg.is_close() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "socket stayed open past the maximum age");
+
+        let left = tokio::time::timeout(Duration::from_secs(2), async {
+            while state.ws_clients.contains_key(USER_ID) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(left.is_ok(), "the room was not left");
     }
 
     #[tokio::test]
