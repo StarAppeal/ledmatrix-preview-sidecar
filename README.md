@@ -59,8 +59,10 @@ Environment variables:
 
 ## Health
 `GET /healthz` on port 8765 answers
-`{"status":"ok|degraded","preview_connected":true,"device_sessions":3,"max_device_sessions":50,"viewers":4}`.
-`degraded` means the preview service is not connected on both TCP ports. Requests with a
+`{"status":"ok|degraded","preview_connected":true,"frame_link":true,"device_sessions":3,"max_device_sessions":50,"viewers":4}`.
+`degraded` means the preview service's command socket (port 5002) is not connected. The frame
+socket (port 5001) is only opened once there is a frame to send, so `frame_link` may be `false`
+while idle and does not affect the status. Requests with a
 `CF-Connecting-IP` header (everything coming through Cloudflare) get a 404, so only the backend
 and Docker see it. `rust-preview healthcheck` probes it from inside the container (the image has no curl).
 
